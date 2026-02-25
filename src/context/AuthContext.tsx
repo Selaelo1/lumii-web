@@ -12,7 +12,10 @@ import {
   reauthenticateWithCredential,
   EmailAuthProvider,
   User as FirebaseUser,
-  sendEmailVerification
+  sendEmailVerification,
+  setPersistence,
+  browserLocalPersistence,
+  browserSessionPersistence
 } from 'firebase/auth';
 import { 
   doc, 
@@ -20,38 +23,53 @@ import {
   getDoc, 
   updateDoc,
   serverTimestamp,
-  Timestamp,
-  collection,
-  query,
-  where,
-  getDocs
+  Timestamp
 } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { auth, db } from '../config/firebase';
 
 // ============== TYPES ==============
 export interface User {
+  // Core Auth
   id: string;
   name: string;
   email: string;
   avatar?: string;
-  streak: number;
-  createdAt: Date;
-  lastActive?: Date;
+  
+  // Profile Info
+  bio?: string;
+  currentRole?: string;
+  experienceLevel?: 'beginner' | 'intermediate' | 'advanced';
+  targetCertifications?: string[];
+  preferredStudyTime?: 'morning' | 'afternoon' | 'evening';
+  reminderTime?: string;
+  
+  // Study Goals
   studyGoals?: {
     daily: number; // minutes
     weekly: number; // minutes
   };
+  
+  // Preferences
   preferences?: {
     emailNotifications: boolean;
     studyReminders: boolean;
     theme: 'light' | 'dark' | 'system';
   };
+  
+  // Stats
+  streak: number;
+  createdAt: Date;
+  lastActive?: Date;
   stats?: {
     totalStudyHours: number;
     certificatesCompleted: number;
     longestStreak: number;
   };
+  
+  // Status
   emailVerified?: boolean;
+  isProfileComplete?: boolean;
 }
 
 interface AuthContextType {
@@ -61,7 +79,7 @@ interface AuthContextType {
   error: string | null;
   
   // Auth Actions
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string, rememberMe?: boolean) => Promise<void>;
   logout: () => Promise<void>;
   signup: (name: string, email: string, password: string) => Promise<void>;
   
@@ -71,6 +89,10 @@ interface AuthContextType {
   updateUserPassword: (currentPassword: string, newPassword: string) => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
   sendVerificationEmail: () => Promise<void>;
+  
+  // Profile Setup
+  completeProfileSetup: (profileData: Partial<User>) => Promise<void>;
+  isProfileComplete: () => boolean;
   
   // Helper Functions
   refreshUser: () => Promise<void>;
@@ -87,6 +109,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // ============== CHECK IF PROFILE IS COMPLETE ==============
+  const isProfileComplete = () => {
+    if (!user) return false;
+    
+    return !!(
+      user.isProfileComplete === true || (
+        user.name &&
+        user.bio !== undefined &&
+        user.currentRole !== undefined &&
+        user.experienceLevel !== undefined &&
+        user.studyGoals?.daily &&
+        user.studyGoals?.weekly &&
+        user.preferences
+      )
+    );
+  };
+
   // ============== AUTH STATE LISTENER ==============
   useEffect(() => {
     console.log('🟡 Setting up auth state listener...');
@@ -95,142 +134,163 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.log('🟡 Auth state changed:', firebaseUser ? 'User logged in' : 'No user');
       
       setFirebaseUser(firebaseUser);
-      
+
       if (firebaseUser) {
         try {
-          // Fetch additional user data from Firestore
           const userDocRef = doc(db, 'users', firebaseUser.uid);
           const userDoc = await getDoc(userDocRef);
-          
+
           if (userDoc.exists()) {
             const userData = userDoc.data();
             console.log('🟢 User data fetched from Firestore');
-            
-            // Convert Firestore timestamps to Date objects
-            const createdAt = userData.createdAt instanceof Timestamp 
-              ? userData.createdAt.toDate() 
+
+            const createdAt = userData.createdAt instanceof Timestamp
+              ? userData.createdAt.toDate()
               : new Date(userData.createdAt);
-            
-            const lastActive = userData.lastActive instanceof Timestamp 
-              ? userData.lastActive.toDate() 
+
+            const lastActive = userData.lastActive instanceof Timestamp
+              ? userData.lastActive.toDate()
               : userData.lastActive ? new Date(userData.lastActive) : undefined;
 
             setUser({
               id: firebaseUser.uid,
               name: firebaseUser.displayName || userData.name || '',
-              email: firebaseUser.email || '',
+              email: firebaseUser.email ? firebaseUser.email : '',
               avatar: firebaseUser.photoURL || userData.avatar,
-              streak: userData.streak || 0,
-              createdAt,
-              lastActive,
+              
+              bio: userData.bio || '',
+              currentRole: userData.currentRole || '',
+              experienceLevel: userData.experienceLevel || 'beginner',
+              targetCertifications: userData.targetCertifications || [],
+              preferredStudyTime: userData.preferredStudyTime || 'morning',
+              reminderTime: userData.reminderTime || '09:00',
+              
               studyGoals: userData.studyGoals || { daily: 120, weekly: 600 },
+              
               preferences: userData.preferences || {
                 emailNotifications: true,
                 studyReminders: true,
                 theme: 'light'
               },
+              
+              streak: userData.streak || 0,
+              createdAt,
+              lastActive,
               stats: userData.stats || {
                 totalStudyHours: 0,
                 certificatesCompleted: 0,
                 longestStreak: 0
               },
-              emailVerified: firebaseUser.emailVerified
+              
+              emailVerified: firebaseUser.emailVerified,
+              isProfileComplete: userData.isProfileComplete || false
             });
           } else {
             console.log('🟡 No user document found, creating one...');
             
-            // Create user document if it doesn't exist
             const newUser = {
               name: firebaseUser.displayName || '',
               email: firebaseUser.email,
-              streak: 0,
-              createdAt: serverTimestamp(),
-              lastActive: serverTimestamp(),
+              bio: '',
+              currentRole: '',
+              experienceLevel: 'beginner',
+              targetCertifications: [],
+              preferredStudyTime: 'morning',
+              reminderTime: '09:00',
               studyGoals: { daily: 120, weekly: 600 },
               preferences: {
                 emailNotifications: true,
                 studyReminders: true,
                 theme: 'light'
               },
+              streak: 0,
+              createdAt: serverTimestamp(),
+              lastActive: serverTimestamp(),
               stats: {
                 totalStudyHours: 0,
                 certificatesCompleted: 0,
                 longestStreak: 0
-              }
+              },
+              isProfileComplete: false
             };
-            
+
             try {
               await setDoc(doc(db, 'users', firebaseUser.uid), newUser);
               console.log('🟢 User document created in Firestore');
-              
-              setUser({
+
+              const userObj: User = {
                 id: firebaseUser.uid,
-                name: firebaseUser.displayName || '',
-                email: firebaseUser.email || '',
-                streak: 0,
-                createdAt: new Date(),
+                name: firebaseUser.displayName || newUser.name || '',
+                email: firebaseUser.email || newUser.email || '',
+                avatar: firebaseUser.photoURL || undefined,
+                bio: newUser.bio,
+                currentRole: newUser.currentRole,
+                experienceLevel: newUser.experienceLevel as 'beginner' | 'intermediate' | 'advanced',
+                targetCertifications: newUser.targetCertifications,
+                preferredStudyTime: newUser.preferredStudyTime as 'morning' | 'afternoon' | 'evening',
+                reminderTime: newUser.reminderTime,
                 studyGoals: newUser.studyGoals,
                 preferences: {
-                  ...newUser.preferences,
-                  theme: (['light', 'dark', 'system'].includes(newUser.preferences.theme)
-                    ? newUser.preferences.theme
-                    : 'light') as 'light' | 'dark' | 'system'
+                  emailNotifications: newUser.preferences.emailNotifications,
+                  studyReminders: newUser.preferences.studyReminders,
+                  theme: newUser.preferences.theme as 'light' | 'dark' | 'system'
                 },
+                streak: newUser.streak,
+                createdAt: new Date(),
+                lastActive: new Date(),
                 stats: newUser.stats,
-                emailVerified: firebaseUser.emailVerified
-              });
+                emailVerified: firebaseUser.emailVerified,
+                isProfileComplete: false
+              };
+              setUser(userObj);
             } catch (firestoreError) {
               console.error('🔴 Firestore error creating user document:', firestoreError);
-              // Still set user with basic info even if Firestore fails
               setUser({
                 id: firebaseUser.uid,
                 name: firebaseUser.displayName || '',
                 email: firebaseUser.email || '',
                 streak: 0,
                 createdAt: new Date(),
-                emailVerified: firebaseUser.emailVerified
+                emailVerified: firebaseUser.emailVerified,
+                isProfileComplete: false
               });
             }
           }
         } catch (err) {
           console.error('🔴 Error fetching user data:', err);
-          // Still set user with basic info from Firebase Auth
           setUser({
             id: firebaseUser.uid,
             name: firebaseUser.displayName || '',
             email: firebaseUser.email || '',
             streak: 0,
             createdAt: new Date(),
-            emailVerified: firebaseUser.emailVerified
+            emailVerified: firebaseUser.emailVerified,
+            isProfileComplete: false
           });
         }
       } else {
         setUser(null);
       }
-      
+
       setIsLoading(false);
     });
 
-    // Cleanup subscription
     return () => unsubscribe();
   }, []);
 
   // ============== UPDATE LAST ACTIVE ==============
   useEffect(() => {
     if (user && firebaseUser) {
-      // Update last active timestamp (but not too frequently)
       const updateLastActive = async () => {
         try {
           await updateDoc(doc(db, 'users', firebaseUser.uid), {
             lastActive: serverTimestamp()
           });
         } catch (err) {
-          // Silently fail - not critical
           console.log('Could not update last active');
         }
       };
       
-      // Only update every 5 minutes to avoid too many writes
       const lastUpdate = localStorage.getItem('lastActiveUpdate');
       const now = Date.now();
       
@@ -248,37 +308,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signup = async (name: string, email: string, password: string) => {
     setIsLoading(true);
     setError(null);
-    
+
     try {
       console.log('🟡 Attempting signup for:', email);
       
-      // Validate inputs
       if (!name.trim()) throw new Error('Name is required');
       if (!email.trim()) throw new Error('Email is required');
       if (password.length < 6) throw new Error('Password must be at least 6 characters');
-      
-      // Create user in Firebase Auth
+
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const newFirebaseUser = userCredential.user;
       console.log('🟢 User created in Auth:', newFirebaseUser.uid);
 
-      // Update profile with display name
-      await updateProfile(newFirebaseUser, { 
-        displayName: name 
+      await updateProfile(newFirebaseUser, {
+        displayName: name
       });
       console.log('🟢 Profile updated with name');
 
-      // Send verification email
       await sendEmailVerification(newFirebaseUser);
       console.log('🟢 Verification email sent');
 
-      // Create user document in Firestore
       const userData = {
         name,
         email,
-        streak: 0,
-        createdAt: serverTimestamp(),
-        lastActive: serverTimestamp(),
+        bio: '',
+        currentRole: '',
+        experienceLevel: 'beginner',
+        targetCertifications: [],
+        preferredStudyTime: 'morning',
+        reminderTime: '09:00',
         studyGoals: {
           daily: 120,
           weekly: 600
@@ -288,28 +346,72 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           studyReminders: true,
           theme: 'light'
         },
+        streak: 0,
+        createdAt: serverTimestamp(),
+        lastActive: serverTimestamp(),
         stats: {
           totalStudyHours: 0,
           certificatesCompleted: 0,
           longestStreak: 0
-        }
+        },
+        isProfileComplete: false
       };
 
       try {
         await setDoc(doc(db, 'users', newFirebaseUser.uid), userData);
         console.log('🟢 User document created in Firestore');
+        
+        const newUserObj: User = {
+          id: newFirebaseUser.uid,
+          name: newFirebaseUser.displayName || name,
+          email: newFirebaseUser.email || email,
+          avatar: newFirebaseUser.photoURL || undefined,
+          bio: '',
+          currentRole: '',
+          experienceLevel: 'beginner',
+          targetCertifications: [],
+          preferredStudyTime: 'morning',
+          reminderTime: '09:00',
+          studyGoals: { daily: 120, weekly: 600 },
+          preferences: {
+            emailNotifications: true,
+            studyReminders: true,
+            theme: 'light'
+          },
+          streak: 0,
+          createdAt: new Date(),
+          lastActive: new Date(),
+          stats: {
+            totalStudyHours: 0,
+            certificatesCompleted: 0,
+            longestStreak: 0
+          },
+          emailVerified: newFirebaseUser.emailVerified,
+          isProfileComplete: false
+        };
+        
+        setUser(newUserObj);
+        setFirebaseUser(newFirebaseUser);
+        
       } catch (firestoreError) {
         console.error('🔴 Firestore error:', firestoreError);
-        // Don't throw - user is still created in Auth
         setError('Account created but failed to save additional data. Please refresh.');
+        setUser({
+          id: newFirebaseUser.uid,
+          name: newFirebaseUser.displayName || name,
+          email: newFirebaseUser.email || email,
+          streak: 0,
+          createdAt: new Date(),
+          emailVerified: newFirebaseUser.emailVerified,
+          isProfileComplete: false
+        });
+        setFirebaseUser(newFirebaseUser);
       }
-
     } catch (err: any) {
       console.error('🔴 Signup error:', err);
       
-      // Handle specific Firebase errors
       let errorMessage = 'Signup failed. Please try again.';
-      
+
       switch (err.code) {
         case 'auth/email-already-in-use':
           errorMessage = 'This email is already registered. Please log in instead.';
@@ -326,7 +428,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         default:
           errorMessage = err.message || 'Signup failed. Please try again.';
       }
-      
+
       setError(errorMessage);
       throw new Error(errorMessage);
     } finally {
@@ -334,16 +436,65 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // ============== LOGIN ==============
-  const login = async (email: string, password: string) => {
+  // ============== COMPLETE PROFILE SETUP ==============
+  const completeProfileSetup = async (profileData: Partial<User>) => {
+    if (!firebaseUser) {
+      throw new Error('No user logged in');
+    }
+
     setIsLoading(true);
     setError(null);
-    
+
+    try {
+      console.log('🟡 Completing profile setup...');
+      
+      if (profileData.name && profileData.name !== firebaseUser.displayName) {
+        await updateProfile(firebaseUser, {
+          displayName: profileData.name
+        });
+      }
+
+      const updateData = {
+        ...profileData,
+        isProfileComplete: true,
+        updatedAt: serverTimestamp()
+      };
+
+      delete (updateData as any).id;
+      delete (updateData as any).email;
+      delete (updateData as any).emailVerified;
+
+      await updateDoc(doc(db, 'users', firebaseUser.uid), updateData);
+      console.log('🟢 Profile setup completed in Firestore');
+
+      setUser(prev => prev ? {
+        ...prev,
+        ...profileData,
+        isProfileComplete: true
+      } : null);
+      
+      console.log('✅ Profile setup completed successfully');
+    } catch (err: any) {
+      console.error('🔴 Profile setup error:', err);
+      setError('Failed to complete profile setup. Please try again.');
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // ============== LOGIN ==============
+  const login = async (email: string, password: string, rememberMe: boolean = false) => {
+    setIsLoading(true);
+    setError(null);
+
     try {
       console.log('🟡 Attempting login for:', email);
       
       if (!email.trim()) throw new Error('Email is required');
       if (!password.trim()) throw new Error('Password is required');
+
+      await setPersistence(auth, rememberMe ? browserLocalPersistence : browserSessionPersistence);
       
       await signInWithEmailAndPassword(auth, email, password);
       console.log('🟢 Login successful');
@@ -352,7 +503,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.error('🔴 Login error:', err);
       
       let errorMessage = 'Login failed. Please try again.';
-      
+
       switch (err.code) {
         case 'auth/user-not-found':
         case 'auth/wrong-password':
@@ -371,7 +522,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         default:
           errorMessage = err.message || 'Login failed. Please try again.';
       }
-      
+
       setError(errorMessage);
       throw new Error(errorMessage);
     } finally {
@@ -397,33 +548,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!firebaseUser) {
       throw new Error('No user logged in');
     }
-    
+
     setIsLoading(true);
     setError(null);
-    
+
     try {
       console.log('🟡 Updating profile...');
       
-      // Update Firebase Auth profile if name or avatar changed
       if (data.name || data.avatar) {
         await updateProfile(firebaseUser, {
           displayName: data.name || firebaseUser.displayName,
           photoURL: data.avatar || firebaseUser.photoURL
         });
       }
-      
-      // Update Firestore document
+
       const updateData: any = { ...data };
-      delete updateData.id; // Don't update ID
-      delete updateData.email; // Don't update email here
-      delete updateData.emailVerified; // Don't update this
-      
+      delete updateData.id;
+      delete updateData.email;
+      delete updateData.emailVerified;
+
       await updateDoc(doc(db, 'users', firebaseUser.uid), {
         ...updateData,
         updatedAt: serverTimestamp()
       });
-      
-      // Update local user state
+
       setUser(prev => prev ? { ...prev, ...data } : null);
       
       console.log('🟢 Profile updated successfully');
@@ -441,27 +589,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!firebaseUser) {
       throw new Error('No user logged in');
     }
-    
+
     setIsLoading(true);
     setError(null);
-    
+
     try {
       console.log('🟡 Updating email...');
       
-      // Re-authenticate user
       const credential = EmailAuthProvider.credential(firebaseUser.email!, password);
       await reauthenticateWithCredential(firebaseUser, credential);
-      
-      // Update email
+
       await updateEmail(firebaseUser, newEmail);
-      
-      // Update Firestore
+
       await updateDoc(doc(db, 'users', firebaseUser.uid), {
         email: newEmail,
         updatedAt: serverTimestamp()
       });
-      
-      // Update local state
+
       setUser(prev => prev ? { ...prev, email: newEmail } : null);
       
       console.log('🟢 Email updated successfully');
@@ -474,7 +618,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } else if (err.code === 'auth/email-already-in-use') {
         errorMessage = 'This email is already in use.';
       }
-      
+
       setError(errorMessage);
       throw err;
     } finally {
@@ -487,18 +631,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!firebaseUser) {
       throw new Error('No user logged in');
     }
-    
+
     setIsLoading(true);
     setError(null);
-    
+
     try {
       console.log('🟡 Updating password...');
       
-      // Re-authenticate user
       const credential = EmailAuthProvider.credential(firebaseUser.email!, currentPassword);
       await reauthenticateWithCredential(firebaseUser, credential);
-      
-      // Update password
+
       await updatePassword(firebaseUser, newPassword);
       
       console.log('🟢 Password updated successfully');
@@ -511,7 +653,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } else if (err.code === 'auth/weak-password') {
         errorMessage = 'New password should be at least 6 characters.';
       }
-      
+
       setError(errorMessage);
       throw err;
     } finally {
@@ -519,30 +661,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // ============== RESET PASSWORD ==============
+  // ============== RESET PASSWORD (CUSTOM) ==============
   const resetPassword = async (email: string) => {
     setIsLoading(true);
     setError(null);
-    
+
     try {
-      console.log('🟡 Sending password reset email to:', email);
+      console.log('🟡 Sending custom password reset email to:', email);
       
       if (!email.trim()) {
         throw new Error('Email is required');
       }
+
+      // Call your custom Cloud Function
+      const functions = getFunctions();
+      const sendCustomReset = httpsCallable(functions, 'sendCustomPasswordReset');
       
-      await sendPasswordResetEmail(auth, email);
-      console.log('🟢 Password reset email sent');
+      const result = await sendCustomReset({ email });
+      console.log('🟢 Custom password reset email sent:', result.data);
+      
     } catch (err: any) {
       console.error('🔴 Password reset error:', err);
       
       let errorMessage = 'Failed to send reset email.';
-      if (err.code === 'auth/user-not-found') {
+      
+      if (err.code === 'functions/internal') {
+        errorMessage = 'Unable to send reset email. Please try again later.';
+      } else if (err.code === 'auth/user-not-found') {
         errorMessage = 'No account found with this email.';
       } else if (err.code === 'auth/invalid-email') {
         errorMessage = 'Please enter a valid email address.';
       }
-      
+
       setError(errorMessage);
       throw err;
     } finally {
@@ -555,7 +705,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!firebaseUser) {
       throw new Error('No user logged in');
     }
-    
+
     try {
       await sendEmailVerification(firebaseUser);
       console.log('🟢 Verification email sent');
@@ -571,27 +721,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!firebaseUser) {
       return;
     }
-    
+
     try {
       console.log('🟡 Refreshing user data...');
       
-      // Reload Firebase user
       await firebaseUser.reload();
-      
-      // Refresh Firestore data
+
       const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-      
+
       if (userDoc.exists()) {
         const userData = userDoc.data();
-        
+
         setUser(prev => prev ? {
           ...prev,
           name: firebaseUser.displayName || userData.name || prev.name,
           avatar: firebaseUser.photoURL || userData.avatar || prev.avatar,
-          streak: userData.streak || prev.streak,
+          bio: userData.bio || prev.bio,
+          currentRole: userData.currentRole || prev.currentRole,
+          experienceLevel: userData.experienceLevel || prev.experienceLevel,
+          targetCertifications: userData.targetCertifications || prev.targetCertifications,
+          preferredStudyTime: userData.preferredStudyTime || prev.preferredStudyTime,
+          reminderTime: userData.reminderTime || prev.reminderTime,
           studyGoals: userData.studyGoals || prev.studyGoals,
           preferences: userData.preferences || prev.preferences,
+          streak: userData.streak || prev.streak,
           stats: userData.stats || prev.stats,
+          isProfileComplete: userData.isProfileComplete || prev.isProfileComplete,
           emailVerified: firebaseUser.emailVerified
         } : null);
       }
@@ -615,6 +770,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     updateUserPassword,
     resetPassword,
     sendVerificationEmail,
+    completeProfileSetup,
+    isProfileComplete,
     refreshUser,
     clearError
   };
