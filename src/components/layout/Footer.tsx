@@ -53,8 +53,8 @@ const Footer: React.FC = () => {
   ];
 
   const contactInfo = [
-    { icon: Email, text: 'support@lumii.app', href: 'mailto:support@lumii.app', label: 'Email us' },
-    { icon: Phone, text: '+1 (555) 123-4567', href: 'tel:+15551234567', label: 'Call us' },
+    { icon: Email, text: 'selaelolanga@gmail.com', href: 'mailto:selaelolanga@gmail.com', label: 'Email us' },
+    { icon: Phone, text: '+27 81 496 4249', href: 'tel:+27814964249', label: 'Call us' },
   ];
 
   const quickLinks = [
