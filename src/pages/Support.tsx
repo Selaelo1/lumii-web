@@ -24,7 +24,7 @@ const Support: React.FC = () => {
                 Have a question or need assistance? Our support team is ready to help.
               </p>
               <a 
-                href="mailto:support@lumii.app" 
+                href="mailto:selaelolanga@gmail.com" 
                 className="inline-flex items-center space-x-2 bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 transition-colors"
               >
                 <Email size={16} />
