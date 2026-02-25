@@ -1,5 +1,5 @@
 // App.tsx
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate} from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Layout from './components/layout/Layout';
 import Home from './pages/Home';
@@ -14,7 +14,7 @@ import Signup from './pages/Signup';
 import ProfileSetup from './pages/ProfileSetup';
 import ProtectedRoute from './components/auth/ProtectedRoute';
 import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+
 
 // Component to handle profile completion check
 const ProfileCheck: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -43,7 +43,7 @@ const ProfileCheck: React.FC<{ children: React.ReactNode }> = ({ children }) => 
 };
 
 const AppRoutes = () => {
-  const { user } = useAuth();
+  useAuth();
 
   return (
     <Routes>
